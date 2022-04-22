@@ -16,39 +16,29 @@
 package io.confluent.connect.jdbc.dialect;
 
 import io.confluent.connect.jdbc.dialect.DatabaseDialectProvider.SubprotocolBasedProvider;
+import io.confluent.connect.jdbc.sink.JdbcSinkConfig;
+import io.confluent.connect.jdbc.sink.PreparedStatementBinder;
+import io.confluent.connect.jdbc.sink.metadata.FieldsMetadata;
+import io.confluent.connect.jdbc.sink.metadata.SchemaPair;
 import io.confluent.connect.jdbc.sink.metadata.SinkRecordField;
 import io.confluent.connect.jdbc.source.ColumnMapping;
-import io.confluent.connect.jdbc.util.ColumnDefinition;
-import io.confluent.connect.jdbc.util.ColumnId;
-import io.confluent.connect.jdbc.util.ExpressionBuilder;
+import io.confluent.connect.jdbc.util.*;
 import io.confluent.connect.jdbc.util.ExpressionBuilder.Transform;
-import io.confluent.connect.jdbc.util.IdentifierRules;
-import io.confluent.connect.jdbc.util.TableDefinition;
-import io.confluent.connect.jdbc.util.TableId;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.connect.data.Date;
-import org.apache.kafka.connect.data.Decimal;
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.connect.data.Schema.Type;
-import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.*;
 import org.apache.kafka.connect.data.Time;
 import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.data.Schema.Type;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
+import org.postgresql.util.PGobject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Types;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.sql.*;
+import java.util.*;
 
 /**
  * A {@link DatabaseDialect} for PostgreSQL.
@@ -107,6 +97,26 @@ public class PostgreSqlDatabaseDialect extends GenericDatabaseDialect {
       }
     }
     return result;
+  }
+
+  @Override
+  public StatementBinder statementBinder(
+          PreparedStatement statement,
+          JdbcSinkConfig.PrimaryKeyMode pkMode,
+          SchemaPair schemaPair,
+          FieldsMetadata fieldsMetadata,
+          TableDefinition tableDefinition,
+          JdbcSinkConfig.InsertMode insertMode
+  ) {
+    return new PreparedStatementBinder(
+            this,
+            statement,
+            pkMode,
+            schemaPair,
+            fieldsMetadata,
+            tableDefinition,
+            insertMode
+    );
   }
 
   static int computeMaxIdentifierLength(Connection connection) {
@@ -440,78 +450,6 @@ public class PostgreSqlDatabaseDialect extends GenericDatabaseDialect {
     }
   }
 
-  @Override
-  protected boolean maybeBindPrimitive(
-      PreparedStatement statement,
-      int index,
-      Schema schema,
-      Object value
-  ) throws SQLException {
-
-    switch (schema.type()) {
-      case ARRAY: {
-        Class<?> valueClass = value.getClass();
-        Object newValue = null;
-        Collection<?> valueCollection;
-        if (Collection.class.isAssignableFrom(valueClass)) {
-          valueCollection = (Collection<?>) value;
-        } else if (valueClass.isArray()) {
-          valueCollection = Arrays.asList((Object[]) value);
-        } else {
-          throw new DataException(
-              String.format("Type '%s' is not supported for Array.", valueClass.getName())
-          );
-        }
-
-        // All typecasts below are based on pgjdbc's documentation on how to use primitive arrays
-        // - https://jdbc.postgresql.org/documentation/head/arrays.html
-        switch (schema.valueSchema().type()) {
-          case INT8: {
-            // Gotta do this the long way, as Postgres has no single-byte integer,
-            // so we want to cast to short as the next best thing, and we can't do that with
-            // toArray.
-
-            newValue = valueCollection.stream()
-                .map(o -> ((Byte) o).shortValue())
-                .toArray(Short[]::new);
-            break;
-          }
-          case INT32:
-            newValue = valueCollection.toArray(new Integer[0]);
-            break;
-          case INT16:
-            newValue = valueCollection.toArray(new Short[0]);
-            break;
-          case BOOLEAN:
-            newValue = valueCollection.toArray(new Boolean[0]);
-            break;
-          case STRING:
-            newValue = valueCollection.toArray(new String[0]);
-            break;
-          case FLOAT64:
-            newValue = valueCollection.toArray(new Double[0]);
-            break;
-          case FLOAT32:
-            newValue = valueCollection.toArray(new Float[0]);
-            break;
-          case INT64:
-            newValue = valueCollection.toArray(new Long[0]);
-            break;
-          default:
-            break;
-        }
-
-        if (newValue != null) {
-          statement.setObject(index, newValue, Types.ARRAY);
-          return true;
-        }
-        break;
-      }
-      default:
-        break;
-    }
-    return super.maybeBindPrimitive(statement, index, schema, value);
-  }
 
   /**
    * Return the transform that produces an assignment expression each with the name of one of the
@@ -607,4 +545,141 @@ public class PostgreSqlDatabaseDialect extends GenericDatabaseDialect {
     return defn.scale();
   }
 
+  @Override
+  public void bindField(
+          PreparedStatement statement,
+          int index,
+          Schema schema,
+          Object value,
+          ColumnDefinition colDef
+  ) throws SQLException {
+    //pg的bit类型，在debezium中变为boolean和bytes
+    if (value == null) {
+      statement.setObject(index, null);
+    } else {
+      boolean bound = maybeBindLogical(statement, index, schema, value);
+      if (!bound) {
+        bound = maybeBindPrimitive(statement, index, schema, value, colDef);
+      }
+      if (!bound) {
+        throw new ConnectException("Unsupported source data type: " + schema.type());
+      }
+    }
+  }
+
+
+  @Override
+  protected boolean maybeBindPrimitive(
+          PreparedStatement statement,
+          int index,
+          Schema schema,
+          Object value
+  ) throws SQLException {
+
+    switch (schema.type()) {
+      case ARRAY: {
+        Class<?> valueClass = value.getClass();
+        Object newValue = null;
+        Collection<?> valueCollection;
+        if (Collection.class.isAssignableFrom(valueClass)) {
+          valueCollection = (Collection<?>) value;
+        } else if (valueClass.isArray()) {
+          valueCollection = Arrays.asList((Object[]) value);
+        } else {
+          throw new DataException(
+                  String.format("Type '%s' is not supported for Array.", valueClass.getName())
+          );
+        }
+
+        // All typecasts below are based on pgjdbc's documentation on how to use primitive arrays
+        // - https://jdbc.postgresql.org/documentation/head/arrays.html
+        switch (schema.valueSchema().type()) {
+          case INT8: {
+            // Gotta do this the long way, as Postgres has no single-byte integer,
+            // so we want to cast to short as the next best thing, and we can't do that with
+            // toArray.
+
+            newValue = valueCollection.stream()
+                    .map(o -> ((Byte) o).shortValue())
+                    .toArray(Short[]::new);
+            break;
+          }
+          case INT32:
+            newValue = valueCollection.toArray(new Integer[0]);
+            break;
+          case INT16:
+            newValue = valueCollection.toArray(new Short[0]);
+            break;
+          case BOOLEAN:
+            newValue = valueCollection.toArray(new Boolean[0]);
+            break;
+          case STRING:
+            newValue = valueCollection.toArray(new String[0]);
+            break;
+          case FLOAT64:
+            newValue = valueCollection.toArray(new Double[0]);
+            break;
+          case FLOAT32:
+            newValue = valueCollection.toArray(new Float[0]);
+            break;
+          case INT64:
+            newValue = valueCollection.toArray(new Long[0]);
+            break;
+          default:
+            break;
+        }
+
+        if (newValue != null) {
+          statement.setObject(index, newValue, Types.ARRAY);
+          return true;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+    return super.maybeBindPrimitive(statement, index, schema, value);
+  }
+
+  protected boolean maybeBindPrimitive(
+          PreparedStatement statement,
+          int index,
+          Schema schema,
+          Object value,
+          ColumnDefinition colDef
+  ) throws SQLException {
+
+    if (colDef == null) {
+      return maybeBindPrimitive(statement, index, schema, value);
+    }
+    if ("bit".equals(colDef.typeName()) || "varbit".equals(colDef.typeName())) {
+      PGobject pgObject = new PGobject();
+      pgObject.setType("bit");
+      pgObject.setValue(toBitString(value, colDef.precision()));
+      statement.setObject(index, pgObject);
+      return true;
+    }
+
+    return maybeBindPrimitive(statement, index, schema, value);
+  }
+
+  private String toBitString(Object value, int stringLength) {
+    if (value instanceof Boolean) {
+      return value.equals(true) ? "1" : "0";
+    } else if (value instanceof Byte) {
+      byte[] vb = new byte[1];
+      vb[0] = (byte)value;
+      return BytesUtil.toBinary(vb, stringLength);
+    } else if (value instanceof byte[]) {
+      return BytesUtil.toBinary((byte[]) value, stringLength);
+    } else if (value instanceof Byte[]) {
+      Byte[] valueB = (Byte[])value;
+      byte[] bytes = new byte[valueB.length];
+      for (int i = 0; i < valueB.length; i++) {
+        bytes[i] = valueB[i];
+      }
+      return BytesUtil.toBinary(bytes, stringLength);
+    }
+    return value.toString();
+  }
 }

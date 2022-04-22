@@ -27,4 +27,29 @@ public class BytesUtil {
     }
     return r.toString();
   }
+
+  public static String toBinary(byte[] data, int scale) {
+    StringBuilder r = new StringBuilder(data.length * 8);
+    for (byte b : data) {
+      r.append((b >> 7) & 0x1);
+      r.append((b >> 6) & 0x1);
+      r.append((b >> 5) & 0x1);
+      r.append((b >> 4) & 0x1);
+      r.append((b >> 3) & 0x1);
+      r.append((b >> 2) & 0x1);
+      r.append((b >> 1) & 0x1);
+      r.append(b & 0x1);
+    }
+    if (scale < r.length()) {
+      return r.substring(r.length() - scale);
+    } else if (scale > r.length()) {
+      for (int i = r.length(); i < scale; i++) {
+        r.insert(0, "0");
+      }
+    } else {
+      return r.toString();
+    }
+    return r.toString();
+  }
+
 }

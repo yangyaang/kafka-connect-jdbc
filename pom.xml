@@ -26,7 +26,7 @@
     <groupId>io.confluent</groupId>
     <artifactId>kafka-connect-jdbc</artifactId>
     <packaging>jar</packaging>
-    <version>10.4.2-SNAPSHOT</version>
+    <version>10.4.2-SNAPSHOT-msun</version>
     <name>kafka-connect-jdbc</name>
     <organization>
         <name>Confluent, Inc.</name>
@@ -99,7 +99,8 @@
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>${postgresql.version}</version>
-            <scope>runtime</scope>
+<!--            <scope>runtime</scope>-->
+            <scope>provided</scope>
         </dependency>
         <dependency>
             <!--

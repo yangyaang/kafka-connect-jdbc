@@ -183,6 +183,7 @@ public class PreparedStatementBinder implements StatementBinder {
   protected void bindField(int index, Schema schema, Object value, String fieldName)
       throws SQLException {
     ColumnDefinition colDef = tabDef == null ? null : tabDef.definitionForColumn(fieldName);
+    //调用各个数据库的bindField方法，加上了目标库该字段的定义colDef，默认实现没有用到colDef，pg需要重写这个方法
     dialect.bindField(statement, index, schema, value, colDef);
   }
 }

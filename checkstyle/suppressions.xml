@@ -23,4 +23,7 @@
 
     <suppress checks="ParameterNumber"
               files="(ColumnDefinition|GenericDatabaseDialect|SqlServerDatabaseDialect|PostgreSqlDatabaseDialect|TimestampIncrementingTableQuerier).java"/>
+
+    <suppress checks="AvoidStarImport"
+              files="(PostgreSqlDatabaseDialect).java"/>
 </suppressions>

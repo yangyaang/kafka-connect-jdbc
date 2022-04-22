@@ -1646,6 +1646,7 @@ public class GenericDatabaseDialect implements DatabaseDialect {
         statement.setObject(index, null);
       }
     } else {
+      //处理date，time等logical类型
       boolean bound = maybeBindLogical(statement, index, schema, value);
       if (!bound) {
         bound = maybeBindPrimitive(statement, index, schema, value);
